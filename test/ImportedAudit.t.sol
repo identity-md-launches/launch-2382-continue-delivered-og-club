@@ -2,6 +2,8 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {MockSwarmPepe} from "../src/mocks/MockSwarmPepe.sol";
+import {IDelegateRegistry} from "../src/interfaces/IDelegateRegistry.sol";
 import {MockOG} from "../src/mocks/MockOG.sol";
 import {OGClubFurniture} from "../src/OGClubFurniture.sol";
 import {OGClubFarmVault} from "../src/OGClubFarmVault.sol";
@@ -13,6 +15,12 @@ import {HeaderBuilder} from "./helpers/HeaderBuilder.sol";
 
 /// @notice Reproductions of the imported audit; existing contracts must remain unchanged.
 contract ImportedAuditTest is Test {
+    MockSwarmPepe internal pepes;
+    IDelegateRegistry internal delegates;
+
+    function _upgradePrices() internal pure returns (uint256[3] memory) {
+        return [uint256(200_000e18 + 1), 400_000e18 + 3, 800_000e18 + 7];
+    }
     MockOG internal token;
     OGClubFurniture internal furniture;
     OGClubFarmVault internal vault;
@@ -23,6 +31,7 @@ contract ImportedAuditTest is Test {
     function setUp() public {
         vm.warp(1_800_000_000);
         vm.roll(1000);
+        pepes = new MockSwarmPepe();
         token = new MockOG(address(this));
         furniture = new OGClubFurniture(address(this), address(this));
         vault = new OGClubFarmVault(token, address(this));
@@ -71,13 +80,24 @@ contract ImportedAuditTest is Test {
         vm.warp(block.timestamp + 1 days);
         assertEq(staking.pointsOf(alice), 1e30);
         OGClubClubs clubs = new OGClubClubs(
-            token, address(vault), 100_000e18, IERC1155(address(furniture)), address(this), address(this)
+            token,
+            address(vault),
+            100_000e18,
+            IERC1155(address(furniture)),
+            address(this),
+            address(this),
+            pepes,
+            delegates,
+            _upgradePrices()[0],
+            _upgradePrices()[1],
+            _upgradePrices()[2]
         );
         clubs.setSaleOpen(true);
+        pepes.mint(alice, 1);
         vm.startPrank(alice);
         token.mint(alice, clubs.price());
         token.approve(address(clubs), clubs.price());
-        clubs.mintClub();
+        clubs.mintClub(1);
         vm.stopPrank();
         assertEq(clubs.ownerOf(1), alice);
         assertEq(token.balanceOf(address(vault)), 50_000e18);
@@ -116,13 +136,24 @@ contract ImportedAuditTest is Test {
 
     function test_Audit9dcac50_ClubsNowWorkWithoutRaffleBootstrapRoles() public {
         OGClubClubs clubs = new OGClubClubs(
-            token, address(vault), 100_000e18, IERC1155(address(furniture)), address(this), address(this)
+            token,
+            address(vault),
+            100_000e18,
+            IERC1155(address(furniture)),
+            address(this),
+            address(this),
+            pepes,
+            delegates,
+            _upgradePrices()[0],
+            _upgradePrices()[1],
+            _upgradePrices()[2]
         );
         clubs.setSaleOpen(true);
+        pepes.mint(alice, 1);
         vm.startPrank(alice);
         token.mint(alice, 100_000e18);
         token.approve(address(clubs), 100_000e18);
-        clubs.mintClub();
+        clubs.mintClub(1);
         vm.stopPrank();
         assertFalse(furniture.bootstrapped());
         assertFalse(staking.bootstrapped());

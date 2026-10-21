@@ -6,6 +6,8 @@ import {IERC1155} from "@openzeppelin/contracts/token/ERC1155/IERC1155.sol";
 import {OGClubClubs} from "../src/OGClubClubs.sol";
 import {OGClubFurniture} from "../src/OGClubFurniture.sol";
 import {OGClubFarmVault} from "../src/OGClubFarmVault.sol";
+import {MockSwarmPepe} from "../src/mocks/MockSwarmPepe.sol";
+import {IDelegateRegistry} from "../src/interfaces/IDelegateRegistry.sol";
 import {MockOG} from "../src/mocks/MockOG.sol";
 
 /// @dev Drives clubs with several actors, club approvals, furniture operators, transfers and owner footprint
@@ -24,6 +26,7 @@ contract AdversarialClubsHandler is Test {
     // Ghosts.
     mapping(uint256 clubId => bool[100]) internal grid;
     mapping(uint256 clubId => uint256) public ghostPieces;
+    mapping(uint256 clubId => mapping(uint256 item => bool)) public ghostDesign;
     mapping(uint256 item => uint256) public ghostHeld;
     mapping(uint256 item => uint8) public ghostW;
     mapping(uint256 item => uint8) public ghostH;
@@ -42,7 +45,7 @@ contract AdversarialClubsHandler is Test {
         admin = admin_;
         actors = [makeAddr("inv a"), makeAddr("inv b"), makeAddr("inv c"), makeAddr("inv d")];
         for (uint256 item = 1; item < ITEMS; ++item) {
-            (uint8 w, uint8 h, bool set,) = clubs_.footprintOf(item);
+            (uint8 w, uint8 h, bool set,,) = clubs_.footprintOf(item);
             ghostW[item] = w;
             ghostH[item] = h;
             ghostSet[item] = set;
@@ -61,25 +64,42 @@ contract AdversarialClubsHandler is Test {
         return grid[clubId][tile];
     }
 
+    function expectedGrid(uint256 clubId) external view returns (bool[100] memory) {
+        return grid[clubId];
+    }
+
+    function _assertGrid(uint256 clubId) private view {
+        for (uint8 y; y < 10; ++y) {
+            for (uint8 x; x < 10; ++x) {
+                assertEq(clubs.tileTaken(clubId, x, y), grid[clubId][uint256(y) * 10 + x]);
+            }
+        }
+    }
+
     // ------------------------------------------------------------------ actions
 
     function mint(uint8 payerSeed, uint8 toSeed, bool useTo) external {
         if (clubCount() >= MAX_CLUBS) return;
         address payer = actors[payerSeed % 4];
-        address to = useTo ? actors[toSeed % 4] : payer;
+        address to = payer;
+        toSeed; // Mint-to was removed: caller is now the Pepe holder and recipient.
+        useTo;
         uint256 price = clubs.price();
         token.mint(payer, price);
         vm.prank(payer);
         token.approve(address(clubs), price);
         uint256 burnBefore = token.balanceOf(clubs.BURN_ADDRESS());
         uint256 vaultBefore = token.balanceOf(clubs.vault());
+        uint256 expectedId = ghostMints + 1;
+        MockSwarmPepe(address(clubs.pepes())).mint(payer, expectedId);
         vm.prank(payer);
-        uint256 id = useTo ? clubs.mintClubTo(to) : clubs.mintClub();
+        uint256 id = clubs.mintClub(expectedId);
         ++ghostMints;
-        assertEq(id, ghostMints, "ids must be sequential from 1");
+        assertEq(id, ghostMints, "club ID must equal the minted Pepe ID");
         assertEq(clubs.ownerOf(id), to);
         ghostBurned += token.balanceOf(clubs.BURN_ADDRESS()) - burnBefore;
         ghostToVault += token.balanceOf(clubs.vault()) - vaultBefore;
+        _assertGrid(id);
     }
 
     function transferClub(uint8 clubSeed, uint8 toSeed) external {
@@ -92,6 +112,7 @@ contract AdversarialClubsHandler is Test {
         vm.prank(holder);
         clubs.transferFrom(holder, to, clubId);
         assertEq(abi.encode(clubs.piecesOf(clubId)), before, "layout must travel unchanged");
+        _assertGrid(clubId);
     }
 
     function approveClub(uint8 clubSeed, uint8 spenderSeed, bool forAll, bool on) external {
@@ -111,7 +132,7 @@ contract AdversarialClubsHandler is Test {
         uint8 w = uint8(wSeed % 6); // includes invalid 0 and 5
         uint8 h = uint8(hSeed % 6);
         vm.prank(admin);
-        try clubs.setFootprint(item, w, h) {
+        try clubs.setFootprint(item, w, h, false) {
             assertFalse(ghostLocked[item], "locked footprint changed");
             assertTrue(w >= 1 && w <= 4 && h >= 1 && h <= 4, "bad footprint accepted");
             ghostW[item] = w;
@@ -202,10 +223,12 @@ contract AdversarialClubsHandler is Test {
             assertEq(furniture.balanceOf(address(clubs), a.item), a.heldBefore);
             assertEq(furniture.balanceOf(a.from, a.item), a.fromBefore);
             if (a.exists) assertEq(clubs.pieceCount(a.clubId), a.countBefore);
-            (,,, bool locked) = clubs.footprintOf(a.item);
+            (,,, bool locked,) = clubs.footprintOf(a.item);
             assertEq(locked, ghostLocked[a.item]);
             ++rejectedPlacements;
         }
+        // Check the entire affected board even when placement was rejected.
+        if (a.exists) _assertGrid(a.clubId);
     }
 
     // ------------------------------------------------------------------ model
@@ -217,6 +240,7 @@ contract AdversarialClubsHandler is Test {
                 grid[clubId][yy * 10 + xx] = true;
             }
         }
+        ghostDesign[clubId][item] = true;
         ++ghostPieces[clubId];
         ++ghostHeld[item];
         ghostLocked[item] = true;
@@ -269,7 +293,8 @@ contract AdversarialClubsHandler is Test {
         if (clubId == 0 || clubId > clubCount()) return OGClubClubs.NonexistentToken.selector;
         if (!_authorized(clubId, from)) return OGClubClubs.NotClubOwner.selector;
         if (!ghostSet[item]) return OGClubClubs.NoFootprint.selector;
-        if (ghostPieces[clubId] >= 100) return OGClubClubs.ClubFull.selector;
+        if (ghostPieces[clubId] >= 285) return OGClubClubs.ClubFull.selector;
+        if (ghostDesign[clubId][item]) return OGClubClubs.AlreadyHasDesign.selector;
         if (!_fits(item, x, y, rot)) return OGClubClubs.OutOfRoom.selector;
         if (_coversDoor(item, x, y, rot)) return OGClubClubs.BlocksDoor.selector;
         if (_overlaps(clubId, item, x, y, rot)) return OGClubClubs.TileTaken.selector;
@@ -287,7 +312,8 @@ contract AdversarialClubsHandler is Test {
         if (sel == OGClubClubs.NotClubOwner.selector) return !_authorized(clubId, from);
         if (sel == OGClubClubs.NoFootprint.selector) return !ghostSet[item];
         if (!ghostSet[item]) return false;
-        if (sel == OGClubClubs.ClubFull.selector) return ghostPieces[clubId] >= 100;
+        if (sel == OGClubClubs.ClubFull.selector) return ghostPieces[clubId] >= 285;
+        if (sel == OGClubClubs.AlreadyHasDesign.selector) return ghostDesign[clubId][item];
         if (sel == OGClubClubs.OutOfRoom.selector) return !_fits(item, x, y, rot);
         if (!_fits(item, x, y, rot)) return false;
         if (sel == OGClubClubs.BlocksDoor.selector) return _coversDoor(item, x, y, rot);
@@ -299,6 +325,12 @@ contract AdversarialClubsHandler is Test {
 contract ClubsAdversarialInvariantTest is Test {
     uint256 internal constant PRICE = 100_000e18 + 7;
 
+    MockSwarmPepe internal pepes;
+    IDelegateRegistry internal delegates;
+
+    function _upgradePrices() internal pure returns (uint256[3] memory) {
+        return [uint256(200_000e18 + 1), 400_000e18 + 3, 800_000e18 + 7];
+    }
     MockOG internal token;
     OGClubFurniture internal furniture;
     OGClubFarmVault internal vault;
@@ -309,18 +341,30 @@ contract ClubsAdversarialInvariantTest is Test {
     uint256 internal vaultStart;
 
     function setUp() public {
+        pepes = new MockSwarmPepe();
         token = new MockOG(address(this));
         furniture = new OGClubFurniture(address(this), makeAddr("inv royalty"));
         vault = new OGClubFarmVault(token, address(this));
-        clubs =
-            new OGClubClubs(token, address(vault), PRICE, IERC1155(address(furniture)), admin, makeAddr("inv royalty"));
+        clubs = new OGClubClubs(
+            token,
+            address(vault),
+            PRICE,
+            IERC1155(address(furniture)),
+            admin,
+            makeAddr("inv royalty"),
+            pepes,
+            delegates,
+            _upgradePrices()[0],
+            _upgradePrices()[1],
+            _upgradePrices()[2]
+        );
         vm.startPrank(admin);
         clubs.setSaleOpen(true);
-        clubs.setFootprint(1, 1, 1);
-        clubs.setFootprint(2, 2, 1);
-        clubs.setFootprint(3, 2, 2);
-        clubs.setFootprint(4, 4, 4);
-        clubs.setFootprint(5, 1, 3);
+        clubs.setFootprint(1, 1, 1, false);
+        clubs.setFootprint(2, 2, 1, false);
+        clubs.setFootprint(3, 2, 2, false);
+        clubs.setFootprint(4, 4, 4, false);
+        clubs.setFootprint(5, 1, 3, false);
         vm.stopPrank();
         handler = new AdversarialClubsHandler(clubs, furniture, token, admin);
         furniture.grantMinter(address(handler));
@@ -390,7 +434,7 @@ contract ClubsAdversarialInvariantTest is Test {
             OGClubClubs.Piece[] memory pieces = clubs.piecesOf(clubId);
             bool[100] memory occ;
             for (uint256 p; p < pieces.length; ++p) {
-                (uint8 w, uint8 h, bool set, bool locked) = clubs.footprintOf(pieces[p].furnitureId);
+                (uint8 w, uint8 h, bool set, bool locked,) = clubs.footprintOf(pieces[p].furnitureId);
                 assertTrue(set && locked, "placed id without locked footprint");
                 assertLe(pieces[p].rot, 3);
                 if (pieces[p].rot % 2 == 1) (w, h) = (h, w);
@@ -405,10 +449,7 @@ contract ClubsAdversarialInvariantTest is Test {
                     }
                 }
             }
-            for (uint256 t; t < 100; ++t) {
-                assertEq(clubs.tileTaken(clubId, uint8(t % 10), uint8(t / 10)), occ[t], "tileTaken disagrees");
-                assertEq(handler.gridAt(clubId, t), occ[t], "model disagrees");
-            }
+            assertEq(abi.encode(occ), abi.encode(handler.expectedGrid(clubId)), "model disagrees");
         }
     }
 
@@ -416,7 +457,7 @@ contract ClubsAdversarialInvariantTest is Test {
     /// forge-config: default.invariant.depth = 64
     function invariant_LockedFootprintsNeverChange() public view {
         for (uint256 item = 1; item <= 6; ++item) {
-            (uint8 w, uint8 h, bool set, bool locked) = clubs.footprintOf(item);
+            (uint8 w, uint8 h, bool set, bool locked,) = clubs.footprintOf(item);
             assertEq(locked, handler.ghostLocked(item));
             assertEq(set, handler.ghostSet(item));
             assertEq(w, handler.ghostW(item));
@@ -427,5 +468,15 @@ contract ClubsAdversarialInvariantTest is Test {
     function afterInvariant() external view {
         // Guard against a campaign that silently exercises nothing.
         assertGt(handler.successfulPlacements(), 0, "no placement succeeded");
+        // Global view consistency after each sequence, in addition to each affected board in the handler.
+        for (uint256 i; i < clubs.totalSupply(); ++i) {
+            uint256 clubId = clubs.tokenByIndex(i);
+            bool[100] memory expected = handler.expectedGrid(clubId);
+            for (uint8 y; y < 10; ++y) {
+                for (uint8 x; x < 10; ++x) {
+                    assertEq(clubs.tileTaken(clubId, x, y), expected[uint256(y) * 10 + x]);
+                }
+            }
+        }
     }
 }

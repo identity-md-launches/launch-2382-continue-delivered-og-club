@@ -52,22 +52,25 @@ contract ClubMintReceiver is IERC721Receiver {
         clubs = clubs_;
     }
 
-    function mint(bool propagate_) external {
+    function mint(uint256 pepeId, bool propagate_) external {
         propagate = propagate_;
         clubs.token().approve(address(clubs), 2 * clubs.price());
-        clubs.mintClub();
+        clubs.mintClub(pepeId);
     }
 
     function onERC721Received(address, address, uint256 id, bytes calldata) external returns (bytes4) {
+        if (msg.sender != address(clubs)) return this.onERC721Received.selector;
         receivedId = id;
-        if (propagate) clubs.mintClubTo(address(this));
-        (reentered, reentryError) = address(clubs).call(abi.encodeCall(clubs.mintClubTo, (address(this))));
+        if (propagate) clubs.mintClub(id + 1);
+        (reentered, reentryError) = address(clubs).call(abi.encodeCall(clubs.mintClub, (id + 1)));
         return this.onERC721Received.selector;
     }
 }
 
 contract ClubsMintTest is ClubsTestBase {
-    event ClubMinted(uint256 indexed id, address indexed to, address indexed payer, uint256 burned, uint256 toVault);
+    event ClubMinted(
+        uint256 indexed id, address indexed to, address indexed payer, uint256 burned, uint256 toVault, uint256 pepeId
+    );
 
     function test_IdentityInterfacesAndEmptyClub() public view {
         assertEq(clubs.name(), "OG Club Clubs");
@@ -92,46 +95,40 @@ contract ClubsMintTest is ClubsTestBase {
         assertFalse(clubs.supportsInterface(0xd9b67a26)); // Not an ERC1155 token
     }
 
-    function test_ExactOddSplitMintToEventsAndEnumerationThroughTransfers() public {
-        uint256 beforeAlice = token.balanceOf(alice);
+    function test_ExactOddSplitMintEventsAndEnumerationThroughTransfers() public {
+        uint256 beforeBob = token.balanceOf(bob);
         vm.expectEmit(true, true, true, true, address(clubs));
-        emit ClubMinted(2, bob, alice, PRICE / 2, PRICE - PRICE / 2);
-        vm.prank(alice);
-        assertEq(clubs.mintClubTo(bob), 2);
+        emit ClubMinted(2, bob, bob, PRICE / 2, PRICE - PRICE / 2, 2);
         vm.prank(bob);
-        assertEq(clubs.mintClub(), 3);
-        assertEq(token.balanceOf(alice), beforeAlice - PRICE);
+        assertEq(clubs.mintClub(2), 2);
+        vm.prank(alice);
+        assertEq(clubs.mintClub(3), 3);
+        assertEq(token.balanceOf(bob), beforeBob - PRICE);
         assertEq(token.balanceOf(clubs.BURN_ADDRESS()), 3 * (PRICE / 2));
         assertEq(token.balanceOf(address(vault)), 3 * (PRICE - PRICE / 2));
         assertEq(token.balanceOf(address(clubs)), 0);
         assertEq(clubs.totalSupply(), 3);
-        assertEq(clubs.ownerOf(1), alice);
-        assertEq(clubs.ownerOf(2), bob);
-        assertEq(clubs.ownerOf(3), bob);
         vm.prank(bob);
         clubs.transferFrom(bob, alice, 2);
-        assertEq(clubs.balanceOf(alice), 2);
-        assertEq(clubs.balanceOf(bob), 1);
+        assertEq(clubs.balanceOf(alice), 3);
+        assertEq(clubs.balanceOf(bob), 0);
         assertEq(clubs.tokenOfOwnerByIndex(alice, 0), 1);
-        assertEq(clubs.tokenOfOwnerByIndex(alice, 1), 2);
-        assertEq(clubs.tokenOfOwnerByIndex(bob, 0), 3);
+        assertEq(clubs.tokenOfOwnerByIndex(alice, 1), 3);
+        assertEq(clubs.tokenOfOwnerByIndex(alice, 2), 2);
         for (uint256 i; i < 3; ++i) {
             assertEq(clubs.tokenByIndex(i), i + 1);
         }
     }
 
-    function test_ClosedSaleAndZeroRecipient() public {
+    function test_ClosedSaleAndNonHolder() public {
         clubs.setSaleOpen(false);
         vm.expectRevert(OGClubClubs.SaleClosed.selector);
         vm.prank(alice);
-        clubs.mintClub();
-        vm.expectRevert(OGClubClubs.SaleClosed.selector);
-        vm.prank(alice);
-        clubs.mintClubTo(bob);
+        clubs.mintClub(3);
         clubs.setSaleOpen(true);
-        vm.expectRevert(OGClubClubs.ZeroAddress.selector);
+        vm.expectRevert(OGClubClubs.NotPepeHolder.selector);
         vm.prank(alice);
-        clubs.mintClubTo(address(0));
+        clubs.mintClub(2);
         assertEq(clubs.totalSupply(), 1);
         assertEq(token.balanceOf(address(clubs)), 0);
     }
@@ -149,7 +146,7 @@ contract ClubsMintTest is ClubsTestBase {
             )
         );
         vm.prank(alice);
-        clubs.mintClub();
+        clubs.mintClub(3);
         assertEq(token.balanceOf(alice), beforeBalance);
         assertEq(token.allowance(alice, address(clubs)), PRICE - 1);
         _assertOnlyInitialMint();
@@ -158,6 +155,7 @@ contract ClubsMintTest is ClubsTestBase {
     function test_ShortBalanceRollsBackFirstLeg() public {
         address short = makeAddr("short balance");
         fund(short, PRICE - 1);
+        pepes.mint(short, 4);
         vm.prank(short);
         token.approve(address(clubs), PRICE);
         vm.expectRevert(
@@ -166,36 +164,42 @@ contract ClubsMintTest is ClubsTestBase {
             )
         );
         vm.prank(short);
-        clubs.mintClub();
+        clubs.mintClub(4);
         assertEq(token.balanceOf(short), PRICE - 1);
         _assertOnlyInitialMint();
     }
 
-    function test_NonReceiverRollsBackPaymentAndNextId() public {
-        uint256 beforeBalance = token.balanceOf(alice);
-        uint256 beforeAllowance = token.allowance(alice, address(clubs));
-        vm.expectRevert(abi.encodeWithSelector(IERC721Errors.ERC721InvalidReceiver.selector, address(vault)));
+    function test_NonReceiverRollsBackPaymentAndPepeEligibility() public {
         vm.prank(alice);
-        clubs.mintClubTo(address(vault));
-        assertEq(token.balanceOf(alice), beforeBalance);
-        assertEq(token.allowance(alice, address(clubs)), beforeAllowance);
+        pepes.transferFrom(alice, address(furniture), 3);
+        fund(address(furniture), PRICE);
+        vm.expectRevert(abi.encodeWithSelector(IERC721Errors.ERC721InvalidReceiver.selector, address(furniture)));
+        vm.prank(address(furniture));
+        clubs.mintClub(3);
+        assertEq(token.balanceOf(address(furniture)), PRICE);
+        assertEq(token.allowance(address(furniture), address(clubs)), PRICE);
+        assertFalse(clubs.clubsMinted(3));
         _assertOnlyInitialMint();
+        vm.prank(address(furniture));
+        pepes.transferFrom(address(furniture), alice, 3);
         vm.prank(alice);
-        assertEq(clubs.mintClub(), 2);
+        assertEq(clubs.mintClub(3), 3);
     }
 
     function test_ReceiverCannotDoubleMintAndMayRejectAtomically() public {
         ClubMintReceiver receiver = new ClubMintReceiver(clubs);
         token.mint(address(receiver), 3 * PRICE);
-        receiver.mint(false);
+        pepes.mint(address(receiver), 4);
+        pepes.mint(address(receiver), 5);
+        receiver.mint(4, false);
         assertFalse(receiver.reentered());
         assertEq(receiver.reentryError(), abi.encodeWithSelector(ReentrancyGuard.ReentrancyGuardReentrantCall.selector));
-        assertEq(receiver.receivedId(), 2);
+        assertEq(receiver.receivedId(), 4);
         assertEq(clubs.balanceOf(address(receiver)), 1);
         assertEq(clubs.totalSupply(), 2);
         assertEq(token.balanceOf(address(receiver)), 2 * PRICE);
         vm.expectRevert(ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
-        receiver.mint(true);
+        receiver.mint(5, true);
         assertEq(clubs.totalSupply(), 2);
         assertEq(token.balanceOf(address(receiver)), 2 * PRICE);
         assertEq(token.balanceOf(clubs.BURN_ADDRESS()), 2 * (PRICE / 2));
@@ -203,8 +207,19 @@ contract ClubsMintTest is ClubsTestBase {
 
     function test_TaxedTokensAndFalseReturnsRevertAtomically() public {
         TestToken taxed = new TestToken(18);
-        OGClubClubs target =
-            new OGClubClubs(taxed, address(vault), 10_001, IERC1155(address(furniture)), address(this), royalty);
+        OGClubClubs target = new OGClubClubs(
+            taxed,
+            address(vault),
+            10_001,
+            IERC1155(address(furniture)),
+            address(this),
+            royalty,
+            pepes,
+            delegates,
+            _upgradePrices()[0],
+            _upgradePrices()[1],
+            _upgradePrices()[2]
+        );
         target.setSaleOpen(true);
         taxed.mint(alice, 100_000);
         vm.prank(alice);
@@ -213,7 +228,7 @@ contract ClubsMintTest is ClubsTestBase {
             taxed.configureFee(100, senderFee != 0);
             vm.expectRevert(OGClubClubs.UnexpectedTokenDebit.selector);
             vm.prank(alice);
-            target.mintClub();
+            target.mintClub(1);
             assertEq(taxed.balanceOf(alice), 100_000);
             assertEq(taxed.balanceOf(target.BURN_ADDRESS()), 0);
             assertEq(taxed.balanceOf(address(vault)), 0);
@@ -223,49 +238,81 @@ contract ClubsMintTest is ClubsTestBase {
         taxed.configureFalse(true);
         vm.expectRevert(abi.encodeWithSelector(SafeERC20.SafeERC20FailedOperation.selector, address(taxed)));
         vm.prank(alice);
-        target.mintClub();
+        target.mintClub(1);
         assertEq(target.totalSupply(), 0);
     }
 
     function test_ZeroBurnAtPriceOneAndNoReturnToken() public {
         NoReturnToken noReturn = new NoReturnToken();
         OGClubClubs target = new OGClubClubs(
-            IERC20(address(noReturn)), address(vault), 1, IERC1155(address(furniture)), address(this), royalty
+            IERC20(address(noReturn)),
+            address(vault),
+            1,
+            IERC1155(address(furniture)),
+            address(this),
+            royalty,
+            pepes,
+            delegates,
+            _upgradePrices()[0],
+            _upgradePrices()[1],
+            _upgradePrices()[2]
         );
         target.setSaleOpen(true);
         noReturn.mint(alice, 1);
         vm.startPrank(alice);
         noReturn.approve(address(target), 1);
-        assertEq(target.mintClub(), 1);
+        assertEq(target.mintClub(1), 1);
         vm.stopPrank();
         assertEq(noReturn.balanceOf(target.BURN_ADDRESS()), 0);
         assertEq(noReturn.balanceOf(address(vault)), 1);
         assertEq(noReturn.balanceOf(address(target)), 0);
     }
 
-    function test_TokenCallbackCannotReenterEitherMintEntryPoint() public {
+    function test_TokenCallbackCannotReenterMintOrUpgrade() public {
         TestToken callback = new TestToken(18);
-        OGClubClubs target =
-            new OGClubClubs(callback, address(vault), 10, IERC1155(address(furniture)), address(this), royalty);
+        OGClubClubs target = new OGClubClubs(
+            callback,
+            address(vault),
+            10,
+            IERC1155(address(furniture)),
+            address(this),
+            royalty,
+            pepes,
+            delegates,
+            _upgradePrices()[0],
+            _upgradePrices()[1],
+            _upgradePrices()[2]
+        );
         target.setSaleOpen(true);
         callback.mint(alice, 20);
         vm.prank(alice);
         callback.approve(address(target), 20);
-        callback.configureCallback(address(target), abi.encodeCall(target.mintClub, ()));
+        callback.configureCallback(address(target), abi.encodeCall(target.mintClub, (1)));
         vm.prank(alice);
-        target.mintClub();
+        target.mintClub(1);
         assertFalse(callback.callbackSucceeded());
-        callback.configureCallback(address(target), abi.encodeCall(target.mintClubTo, (bob)));
+        callback.configureCallback(address(target), abi.encodeCall(target.upgradeClub, (1)));
         vm.prank(alice);
-        target.mintClub();
+        target.mintClub(3);
         assertFalse(callback.callbackSucceeded());
         assertEq(target.totalSupply(), 2);
     }
 
     function test_SecondRecipientAndFinalFirstRecipientBalancesMustBothMatch() public {
         ClubReceiptToken adversary = new ClubReceiptToken();
-        OGClubClubs target =
-            new OGClubClubs(adversary, address(vault), 101, IERC1155(address(furniture)), address(this), royalty);
+        OGClubClubs target = new OGClubClubs(
+            adversary,
+            address(vault),
+            101,
+            IERC1155(address(furniture)),
+            address(this),
+            royalty,
+            pepes,
+            delegates,
+            _upgradePrices()[0],
+            _upgradePrices()[1],
+            _upgradePrices()[2]
+        );
         target.setSaleOpen(true);
         adversary.mint(alice, 1000);
         adversary.mint(address(vault), 100);
@@ -276,7 +323,7 @@ contract ClubsMintTest is ClubsTestBase {
             adversary.configure(address(vault), mode);
             vm.expectRevert(OGClubClubs.UnexpectedTokenDebit.selector);
             vm.prank(alice);
-            target.mintClub();
+            target.mintClub(1);
             assertEq(adversary.balanceOf(alice), 1000);
             assertEq(adversary.balanceOf(address(vault)), 100);
             assertEq(adversary.balanceOf(target.BURN_ADDRESS()), 100);
@@ -287,29 +334,59 @@ contract ClubsMintTest is ClubsTestBase {
     }
 
     function test_BurnSinkCannotAlsoBeVaultAndPayerCannotPayItself() public {
-        OGClubClubs target =
-            new OGClubClubs(token, clubs.BURN_ADDRESS(), 10, IERC1155(address(furniture)), address(this), royalty);
+        address burnSink = clubs.BURN_ADDRESS();
+        vm.expectRevert(OGClubClubs.UnexpectedTokenDebit.selector);
+        new OGClubClubs(
+            token,
+            burnSink,
+            10,
+            IERC1155(address(furniture)),
+            address(this),
+            royalty,
+            pepes,
+            delegates,
+            _upgradePrices()[0],
+            _upgradePrices()[1],
+            _upgradePrices()[2]
+        );
+        OGClubClubs target = new OGClubClubs(
+            token,
+            alice,
+            10,
+            IERC1155(address(furniture)),
+            address(this),
+            royalty,
+            pepes,
+            delegates,
+            _upgradePrices()[0],
+            _upgradePrices()[1],
+            _upgradePrices()[2]
+        );
         target.setSaleOpen(true);
         vm.prank(alice);
         token.approve(address(target), 10);
         vm.expectRevert(OGClubClubs.UnexpectedTokenDebit.selector);
         vm.prank(alice);
-        target.mintClub();
-        target = new OGClubClubs(token, alice, 10, IERC1155(address(furniture)), address(this), royalty);
-        target.setSaleOpen(true);
-        vm.prank(alice);
-        token.approve(address(target), 10);
-        vm.expectRevert(OGClubClubs.UnexpectedTokenDebit.selector);
-        vm.prank(alice);
-        target.mintClub();
+        target.mintClub(1);
         _assertOnlyInitialMint();
     }
 
     function testFuzz_PaymentConservation(uint128 priceSeed, uint8 mintSeed) public {
         uint256 price = bound(priceSeed, 1, type(uint128).max);
         uint256 mints = bound(mintSeed, 1, 20);
-        OGClubClubs target =
-            new OGClubClubs(token, address(vault), price, IERC1155(address(furniture)), address(this), royalty);
+        OGClubClubs target = new OGClubClubs(
+            token,
+            address(vault),
+            price,
+            IERC1155(address(furniture)),
+            address(this),
+            royalty,
+            pepes,
+            delegates,
+            _upgradePrices()[0],
+            _upgradePrices()[1],
+            _upgradePrices()[2]
+        );
         target.setSaleOpen(true);
         token.mint(alice, price * mints);
         uint256 burnBefore = token.balanceOf(target.BURN_ADDRESS());
@@ -317,7 +394,8 @@ contract ClubsMintTest is ClubsTestBase {
         vm.startPrank(alice);
         token.approve(address(target), price * mints);
         for (uint256 i; i < mints; ++i) {
-            assertEq(target.mintClubTo(bob), i + 1);
+            pepes.mint(alice, i + 100);
+            assertEq(target.mintClub(i + 100), i + 100);
         }
         vm.stopPrank();
         uint256 burned = token.balanceOf(target.BURN_ADDRESS()) - burnBefore;
@@ -342,11 +420,11 @@ contract ClubsAdminTest is ClubsTestBase {
     function test_MetadataFreezeIsPermanentButPlacementsContinue() public {
         assertEq(clubs.tokenURI(1), "1.json");
         vm.expectEmit(false, false, false, true, address(clubs));
-        emit BatchMetadataUpdate(1, type(uint256).max);
+        emit BatchMetadataUpdate(0, type(uint256).max);
         clubs.setBaseURI("ipfs://clubs/");
         assertEq(clubs.tokenURI(1), "ipfs://clubs/1.json");
         vm.expectEmit(false, false, false, true, address(clubs));
-        emit BatchMetadataUpdate(1, type(uint256).max);
+        emit BatchMetadataUpdate(0, type(uint256).max);
         clubs.freezeMetadata();
         assertTrue(clubs.metadataFrozen());
         vm.expectRevert(OGClubClubs.MetadataFrozen.selector);
@@ -356,8 +434,8 @@ contract ClubsAdminTest is ClubsTestBase {
         place(alice, 1, 1, 0, 0, 0);
         assertEq(clubs.pieceCount(1), 1);
         vm.prank(alice);
-        clubs.mintClub();
-        assertEq(clubs.tokenURI(2), "ipfs://clubs/2.json");
+        clubs.mintClub(3);
+        assertEq(clubs.tokenURI(3), "ipfs://clubs/3.json");
     }
 
     function test_MissingTokensRevertInAllClubViews() public {
@@ -397,7 +475,7 @@ contract ClubsAdminTest is ClubsTestBase {
     function test_AllAdminFunctionsRequireOwner() public {
         bytes[] memory calls = new bytes[](6);
         calls[0] = abi.encodeCall(clubs.setSaleOpen, (false));
-        calls[1] = abi.encodeCall(clubs.setFootprint, (1, 4, 4));
+        calls[1] = abi.encodeCall(clubs.setFootprint, (1, 4, 4, false));
         calls[2] = abi.encodeCall(clubs.setBaseURI, ("x"));
         calls[3] = abi.encodeCall(clubs.freezeMetadata, ());
         calls[4] = abi.encodeCall(clubs.setRoyalty, (alice, 0));
@@ -428,7 +506,7 @@ contract ClubsAdminTest is ClubsTestBase {
         clubs.setBaseURI("changed/");
         vm.expectRevert(OGClubClubs.FootprintLocked.selector);
         vm.prank(bob);
-        clubs.setFootprint(1, 2, 2);
+        clubs.setFootprint(1, 2, 2, false);
         vm.prank(bob);
         clubs.setSaleOpen(false);
         assertFalse(clubs.saleOpen());
@@ -437,7 +515,7 @@ contract ClubsAdminTest is ClubsTestBase {
 
     function test_OwnerCannotMintFreeSeizeBurnOrWithdraw() public {
         vm.expectRevert();
-        clubs.mintClubTo(bob);
+        clubs.mintClub(2);
         vm.expectRevert(abi.encodeWithSelector(IERC721Errors.ERC721InsufficientApproval.selector, address(this), 1));
         clubs.transferFrom(alice, bob, 1);
         bytes[] memory calls = new bytes[](7);
@@ -467,10 +545,27 @@ contract ClubsAdminTest is ClubsTestBase {
                 i == 2 ? 0 : PRICE,
                 i == 3 ? IERC1155(address(0)) : IERC1155(address(furniture)),
                 i == 4 ? address(0) : address(this),
-                i == 5 ? address(0) : royalty
+                i == 5 ? address(0) : royalty,
+                pepes,
+                delegates,
+                _upgradePrices()[0],
+                _upgradePrices()[1],
+                _upgradePrices()[2]
             );
         }
-        OGClubClubs fresh = new OGClubClubs(token, address(vault), PRICE, IERC1155(address(furniture)), bob, royalty);
+        OGClubClubs fresh = new OGClubClubs(
+            token,
+            address(vault),
+            PRICE,
+            IERC1155(address(furniture)),
+            bob,
+            royalty,
+            pepes,
+            delegates,
+            _upgradePrices()[0],
+            _upgradePrices()[1],
+            _upgradePrices()[2]
+        );
         assertFalse(fresh.saleOpen());
         assertEq(fresh.owner(), bob);
         assertEq(fresh.totalSupply(), 0);

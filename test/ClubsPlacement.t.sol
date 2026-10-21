@@ -3,7 +3,6 @@ pragma solidity ^0.8.24;
 
 import {ClubsTestBase} from "./helpers/ClubsTestBase.sol";
 import {OGClubClubs} from "../src/OGClubClubs.sol";
-import {stdStorage, StdStorage} from "forge-std/StdStorage.sol";
 import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import {IERC1155Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 
@@ -14,10 +13,8 @@ contract OtherFurniture is ERC1155 {
 }
 
 contract ClubsPlacementTest is ClubsTestBase {
-    using stdStorage for StdStorage;
-
     event FurniturePlaced(
-        uint256 indexed clubId, uint256 indexed furnitureId, uint8 x, uint8 y, uint8 rot, uint256 index
+        uint256 indexed clubId, uint256 indexed furnitureId, uint8 x, uint8 y, uint8 rot, uint256 index, bool wall
     );
     event MetadataUpdate(uint256 tokenId);
 
@@ -25,7 +22,9 @@ contract ClubsPlacementTest is ClubsTestBase {
         _placeAndCheck(1, 0, 0, 0, 0);
         for (uint8 rot; rot < 4; ++rot) {
             uint8 x = 2 * rot;
-            _placeAndCheck(2, x, 6, rot, rot + 1);
+            clubs.setFootprint(10 + rot, 2, 1, false);
+            stock(alice, 10 + rot, 1);
+            _placeAndCheck(10 + rot, x, 6, rot, rot + 1);
             assertTrue(clubs.tileTaken(1, x, 6));
             assertEq(clubs.tileTaken(1, x + 1, 6), rot % 2 == 0);
             assertEq(clubs.tileTaken(1, x, 7), rot % 2 == 1);
@@ -38,12 +37,15 @@ contract ClubsPlacementTest is ClubsTestBase {
         }
         assertEq(clubs.pieceCount(1), 6);
         assertEq(furniture.balanceOf(address(clubs), 1), 1);
-        assertEq(furniture.balanceOf(address(clubs), 2), 4);
+        for (uint256 i = 10; i < 14; ++i) {
+            assertEq(furniture.balanceOf(address(clubs), i), 1);
+        }
         assertEq(furniture.balanceOf(address(clubs), 3), 1);
     }
 
     function test_ClubTokenApprovalAndApprovalForAllPermitOwnersOfFurnitureToPlace() public {
         stock(operator, 1, 4);
+        stock(operator, 2, 4);
         vm.prank(alice);
         clubs.approve(operator, 1);
         place(operator, 1, 1, 0, 0, 0);
@@ -53,7 +55,7 @@ contract ClubsPlacementTest is ClubsTestBase {
         place(operator, 1, 1, 1, 0, 0);
         vm.prank(alice);
         clubs.setApprovalForAll(operator, true);
-        place(operator, 1, 1, 1, 0, 0);
+        place(operator, 1, 2, 1, 0, 0);
         vm.prank(alice);
         clubs.setApprovalForAll(operator, false);
         vm.expectRevert(OGClubClubs.NotClubOwner.selector);
@@ -167,7 +169,7 @@ contract ClubsPlacementTest is ClubsTestBase {
         stock(alice, 5, 2);
         vm.expectRevert(OGClubClubs.NoFootprint.selector);
         place(alice, 1, 5, 0, 0, 0);
-        (uint8 w, uint8 h, bool set, bool locked) = clubs.footprintOf(5);
+        (uint8 w, uint8 h, bool set, bool locked,) = clubs.footprintOf(5);
         assertEq(w, 0);
         assertEq(h, 0);
         assertFalse(set);
@@ -175,25 +177,25 @@ contract ClubsPlacementTest is ClubsTestBase {
         uint8[4] memory bad = [uint8(0), 5, 100, 255];
         for (uint256 i; i < bad.length; ++i) {
             vm.expectRevert(OGClubClubs.BadFootprint.selector);
-            clubs.setFootprint(5, bad[i], 1);
+            clubs.setFootprint(5, bad[i], 1, false);
             vm.expectRevert(OGClubClubs.BadFootprint.selector);
-            clubs.setFootprint(5, 1, bad[i]);
+            clubs.setFootprint(5, 1, bad[i], false);
         }
-        clubs.setFootprint(5, 4, 4);
+        clubs.setFootprint(5, 4, 4, false);
         vm.expectRevert(OGClubClubs.OutOfRoom.selector);
         place(alice, 1, 5, 9, 9, 0);
-        clubs.setFootprint(5, 2, 1); // Failed placement did not lock the dimensions.
+        clubs.setFootprint(5, 2, 1, false); // Failed placement did not lock the dimensions.
         place(alice, 1, 5, 2, 0, 0);
-        (w, h, set, locked) = clubs.footprintOf(5);
+        (w, h, set, locked,) = clubs.footprintOf(5);
         assertEq(w, 2);
         assertEq(h, 1);
         assertTrue(set);
         assertTrue(locked);
         vm.expectRevert(OGClubClubs.FootprintLocked.selector);
-        clubs.setFootprint(5, 2, 1); // Even an identical reset is forbidden.
-        clubs.setFootprint(1, 3, 2); // Other IDs remain editable.
+        clubs.setFootprint(5, 2, 1, false); // Even an identical reset is forbidden.
+        clubs.setFootprint(1, 3, 2, false); // Other IDs remain editable.
         vm.prank(bob);
-        clubs.mintClub();
+        clubs.mintClub(2);
         stock(bob, 5, 1);
         place(bob, 2, 5, 2, 0, 0); // Same locked dimensions apply in every club.
         assertTrue(clubs.tileTaken(2, 3, 0));
@@ -231,7 +233,7 @@ contract ClubsPlacementTest is ClubsTestBase {
         malformed[4] = abi.encode(uint256(1), uint256(256), uint8(0), uint8(0));
         malformed[5] = abi.encode(uint256(1), uint8(0), uint8(0), uint256(256));
         for (uint256 i; i < malformed.length; ++i) {
-            vm.expectRevert();
+            vm.expectRevert(OGClubClubs.BadPlacementData.selector);
             vm.prank(alice);
             furniture.safeTransferFrom(alice, address(clubs), 1, 1, malformed[i]);
             assertEq(furniture.balanceOf(alice, 1), 200);
@@ -240,29 +242,21 @@ contract ClubsPlacementTest is ClubsTestBase {
         }
     }
 
-    function test_All98UsableTilesFillAndNo99th100thOr101stPlacementFits() public {
+    function test_LevelOneAll98UsableTilesFillWithDistinctDesigns() public {
         for (uint8 y; y < 10; ++y) {
             for (uint8 x; x < 10; ++x) {
                 if (y == 4 && x < 2) continue;
-                place(alice, 1, 1, x, y, 0);
+                uint256 item = 100 + uint256(y) * 10 + x;
+                clubs.setFootprint(item, 1, 1, false);
+                stock(alice, item, 1);
+                place(alice, 1, item, x, y, 0);
+                assertTrue(clubs.hasDesign(1, item));
+                assertEq(furniture.balanceOf(address(clubs), item), 1);
             }
         }
         assertEq(clubs.pieceCount(1), 98);
-        for (uint256 attempt = 99; attempt <= 101; ++attempt) {
-            _reject(1, 0, 0, 0, OGClubClubs.TileTaken.selector);
-            _reject(1, 0, 4, 0, OGClubClubs.BlocksDoor.selector);
-        }
-        assertEq(furniture.balanceOf(address(clubs), 1), 98);
-    }
-
-    function test_Defensive100PieceGuardUsingSyntheticUnreachableStorage() public {
-        // Valid play cannot reach 100 (98 usable cells). Exercise the separately required cap
-        // with a test-only storage mutation; no harness or privileged storage setter is shipped.
-        stdstore.target(address(clubs)).sig("pieceCount(uint256)").with_key(1).checked_write(100);
-        vm.expectRevert(OGClubClubs.ClubFull.selector);
-        place(alice, 1, 1, 0, 0, 0);
-        assertEq(furniture.balanceOf(address(clubs), 1), 0);
-        assertEq(furniture.balanceOf(alice, 1), 200);
+        _reject(1, 0, 0, 0, OGClubClubs.TileTaken.selector);
+        _reject(1, 0, 4, 0, OGClubClubs.BlocksDoor.selector);
     }
 
     function test_FurnitureCannotLeaveForClubHolderOperatorOrContractOwner() public {
@@ -296,7 +290,7 @@ contract ClubsPlacementTest is ClubsTestBase {
 
     function _placeAndCheck(uint256 item, uint8 x, uint8 y, uint8 rot, uint256 index) private {
         vm.expectEmit(true, true, false, true, address(clubs));
-        emit FurniturePlaced(1, item, x, y, rot, index);
+        emit FurniturePlaced(1, item, x, y, rot, index, false);
         vm.expectEmit(false, false, false, true, address(clubs));
         emit MetadataUpdate(1);
         place(alice, 1, item, x, y, rot);
@@ -321,7 +315,7 @@ contract ClubsPlacementTest is ClubsTestBase {
     }
 
     function _footprintState(uint256 item) private view returns (bytes32) {
-        (uint8 w, uint8 h, bool set, bool locked) = clubs.footprintOf(item);
+        (uint8 w, uint8 h, bool set, bool locked,) = clubs.footprintOf(item);
         return keccak256(abi.encode(w, h, set, locked));
     }
 }
